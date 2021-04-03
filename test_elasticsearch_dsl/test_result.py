@@ -2,7 +2,7 @@ import pickle
 from datetime import date
 from pytest import raises, fixture
 
-from elasticsearch_dsl import response, Search, DocType, Date, Object
+from elasticsearch_dsl import response, Search, Document, Date, Object
 from elasticsearch_dsl.aggs import Terms
 from elasticsearch_dsl.response.aggs import AggResponse, BucketData, Bucket
 
@@ -32,6 +32,7 @@ def test_hit_is_pickleable(dummy_response):
     hits = pickle.loads(pickle.dumps(res.hits))
 
     assert hits == res.hits
+    assert hits[0].meta == res.hits[0].meta
 
 def test_response_stores_search(dummy_response):
     s = Search()
@@ -53,16 +54,16 @@ def test_interactive_helpers(dummy_response):
     hits = res.hits
     h = hits[0]
 
-    rhits = "[<Hit(test-index/company/elasticsearch): %s>, <Hit(test-index/employee/42): %s...}>, <Hit(test-index/employee/47): %s...}>, <Hit(test-index/employee/53): {}>]" % (
-            repr(dummy_response['hits']['hits'][0]['_source']),
-            repr(dummy_response['hits']['hits'][1]['_source'])[:60],
-            repr(dummy_response['hits']['hits'][2]['_source'])[:60],
-            )
+    rhits = "[<Hit(test-index/company/elasticsearch): {}>, <Hit(test-index/employee/42): {}...}}>, <Hit(test-index/employee/47): {}...}}>, <Hit(test-index/employee/53): {{}}>]".format(
+        repr(dummy_response['hits']['hits'][0]['_source']),
+        repr(dummy_response['hits']['hits'][1]['_source'])[:60],
+        repr(dummy_response['hits']['hits'][2]['_source'])[:60],
+    )
 
     assert res
     assert '<Response: %s>' % rhits == repr(res)
     assert rhits == repr(hits)
-    assert set(['meta', 'city', 'name']) == set(dir(h))
+    assert {'meta', 'city', 'name'} == set(dir(h))
     assert "<Hit(test-index/company/elasticsearch): %r>" % dummy_response['hits']['hits'][0]['_source'] == repr(h)
 
 def test_empty_response_is_false(dummy_response):
@@ -148,9 +149,13 @@ def test_bucket_response_can_be_iterated_over(agg_response):
     assert buckets == popular_files.buckets
 
 def test_bucket_keys_get_deserialized(aggs_data, aggs_search):
-    class Commit(DocType):
+    class Commit(Document):
         info = Object(properties={'committed_date': Date()})
-    aggs_search._doc_type_map = {'commit': Commit}
+
+        class Index:
+            name = 'test-commit'
+
+    aggs_search = aggs_search.doc_type(Commit)
     agg_response = response.Response(aggs_search, aggs_data)
 
     per_month = agg_response.aggregations.per_month

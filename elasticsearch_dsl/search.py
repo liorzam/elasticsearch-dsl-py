@@ -1,17 +1,22 @@
 import copy
-import collections
+
+try:
+    import collections.abc as collections_abc  # only works on python 3.3+
+except ImportError:
+    import collections as collections_abc
 
 from six import iteritems, string_types
 
 from elasticsearch.helpers import scan
 from elasticsearch.exceptions import TransportError
 
-from .query import Q, EMPTY_QUERY, Bool
+from .query import Q, Bool
 from .aggs import A, AggBase
 from .utils import DslBase, AttrDict
 from .response import Response, Hit
 from .connections import connections
 from .exceptions import IllegalOperation
+
 
 class QueryProxy(object):
     """
@@ -21,16 +26,23 @@ class QueryProxy(object):
     """
     def __init__(self, search, attr_name):
         self._search = search
-        self._proxied = EMPTY_QUERY
+        self._proxied = None
         self._attr_name = attr_name
 
     def __nonzero__(self):
-        return self._proxied != EMPTY_QUERY
+        return self._proxied is not None
     __bool__ = __nonzero__
 
     def __call__(self, *args, **kwargs):
         s = self._search._clone()
-        getattr(s, self._attr_name)._proxied &= Q(*args, **kwargs)
+
+        # we cannot use self._proxied since we just cloned self._search and
+        # need to access the new self on the clone
+        proxied = getattr(s, self._attr_name)
+        if proxied._proxied is None:
+            proxied._proxied = Q(*args, **kwargs)
+        else:
+            proxied._proxied &= Q(*args, **kwargs)
 
         # always return search to be chainable
         return s
@@ -45,7 +57,7 @@ class QueryProxy(object):
         super(QueryProxy, self).__setattr__(attr_name, value)
 
     def __getstate__(self):
-        return (self._search, self._proxied, self._attr_name)
+        return self._search, self._proxied, self._attr_name
 
     def __setstate__(self, state):
         self._search, self._proxied, self._attr_name = state
@@ -73,11 +85,13 @@ class ProxyDescriptor(object):
 class AggsProxy(AggBase, DslBase):
     name = 'aggs'
     def __init__(self, search):
-        self._base = self._search = search
+        self._base = self
+        self._search = search
         self._params = {'aggs': {}}
 
     def to_dict(self):
         return super(AggsProxy, self).to_dict().get('aggs', {})
+
 
 class Request(object):
     def __init__(self, using='default', index=None, doc_type=None, extra=None):
@@ -93,7 +107,7 @@ class Request(object):
         self._doc_type_map = {}
         if isinstance(doc_type, (tuple, list)):
             self._doc_type.extend(doc_type)
-        elif isinstance(doc_type, collections.Mapping):
+        elif isinstance(doc_type, collections_abc.Mapping):
             self._doc_type.extend(doc_type.keys())
             self._doc_type_map.update(doc_type)
         elif doc_type:
@@ -162,20 +176,30 @@ class Request(object):
         """
         Return a list of doc_type names to be used
         """
-        return list(set(dt._doc_type.name if hasattr(dt, '_doc_type') else dt for dt in self._doc_type))
+        return list({dt._doc_type.name if hasattr(dt, '_doc_type') else dt for dt in self._doc_type})
 
-    def _resolve_nested(self, field, parent_class=None):
+    def _resolve_field(self, path):
+        for dt in self._doc_type:
+            if not hasattr(dt, '_index'):
+                continue
+            field = dt._index.resolve_field(path)
+            if field is not None:
+                return field
+
+    def _resolve_nested(self, hit, parent_class=None):
         doc_class = Hit
-        if hasattr(parent_class, '_doc_type'):
-            nested_field = parent_class._doc_type.resolve_field(field)
 
+        nested_path = []
+        nesting = hit['_nested']
+        while nesting and 'field' in nesting:
+            nested_path.append(nesting['field'])
+            nesting = nesting.get('_nested')
+        nested_path = '.'.join(nested_path)
+
+        if hasattr(parent_class, '_index'):
+            nested_field = parent_class._index.resolve_field(nested_path)
         else:
-            for dt in self._doc_type:
-                if not hasattr(dt, '_doc_type'):
-                    continue
-                nested_field = dt._doc_type.resolve_field(field)
-                if nested_field is not None:
-                    break
+            nested_field = self._resolve_field(nested_path)
 
         if nested_field is not None:
             return nested_field._doc_class
@@ -187,14 +211,14 @@ class Request(object):
         dt = hit.get('_type')
 
         if '_nested' in hit:
-            doc_class = self._resolve_nested(hit['_nested']['field'], parent_class)
+            doc_class = self._resolve_nested(hit, parent_class)
 
         elif dt in self._doc_type_map:
             doc_class = self._doc_type_map[dt]
 
         else:
             for doc_type in self._doc_type:
-                if hasattr(doc_type, '_doc_type') and doc_type._doc_type.matches(hit):
+                if hasattr(doc_type, '_matches') and doc_type._matches(hit):
                     doc_class = doc_type
                     break
 
@@ -204,11 +228,10 @@ class Request(object):
         callback = getattr(doc_class, 'from_es', doc_class)
         return callback(hit)
 
-
     def doc_type(self, *doc_type, **kwargs):
         """
         Set the type to search through. You can supply a single value or
-        multiple. Values can be strings or subclasses of ``DocType``.
+        multiple. Values can be strings or subclasses of ``Document``.
 
         You can also pass in any keyword arguments, mapping a doc_type to a
         callback that should be used instead of the Hit class.
@@ -277,7 +300,7 @@ class Search(Request):
         :arg doc_type: only query this type.
 
         All the parameters supplied (or omitted) at creation type can be later
-        overriden by methods (`using`, `index` and `doc_type` respectively).
+        overridden by methods (`using`, `index` and `doc_type` respectively).
         """
         super(Search, self).__init__(**kwargs)
 
@@ -405,8 +428,8 @@ class Search(Request):
         aggs = d.pop('aggs', d.pop('aggregations', {}))
         if aggs:
             self.aggs._params = {
-                'aggs': dict(
-                    (name, A(value)) for (name, value) in iteritems(aggs))
+                'aggs': {
+                    name: A(value) for (name, value) in iteritems(aggs)}
             }
         if 'sort' in d:
             self._sort = d.pop('sort')
@@ -458,10 +481,10 @@ class Search(Request):
         """
         Selectively control how the _source field is returned.
 
-        :arg source: wildcard string, array of wildcards, or dictionary of includes and excludes
+        :arg fields: wildcard string, array of wildcards, or dictionary of includes and excludes
 
-        If ``source`` is None, the entire document will be returned for
-        each hit.  If source is a dictionary with keys of 'include' and/or
+        If ``fields`` is None, the entire document will be returned for
+        each hit.  If fields is a dictionary with keys of 'include' and/or
         'exclude' the fields will be either included or excluded appropriately.
 
         Calling this multiple times with the same named parameter will override the
@@ -605,12 +628,15 @@ class Search(Request):
         Serialize the search into the dictionary that will be sent over as the
         request's body.
 
-        :arg count: a flag to specify we are interested in a body for count -
+        :arg count: a flag to specify if we are interested in a body for count -
             no aggregations, no pagination bounds etc.
 
         All additional keyword arguments will be included into the dictionary.
         """
-        d = {"query": self.query.to_dict()}
+        d = {}
+
+        if self.query:
+            d["query"] = self.query.to_dict()
 
         # count request doesn't care for sorting and other things
         if not count:
@@ -665,7 +691,8 @@ class Search(Request):
         Execute the search and return an instance of ``Response`` wrapping all
         the data.
 
-        :arg response_class: optional subclass of ``Response`` to use instead.
+        :arg ignore_cache: if set to ``True``, consecutive calls will hit
+            ES, while cached result will be ignored. Defaults to `False`
         """
         if ignore_cache or not hasattr(self, '_response'):
             es = connections.get_connection(self._using)

@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from elasticsearch_dsl import DocType, Boolean, Date
+from elasticsearch_dsl import Document, Boolean, Date, A, Keyword
 from elasticsearch_dsl.faceted_search import FacetedSearch, TermsFacet, \
     DateHistogramFacet, RangeFacet, NestedFacet
 
@@ -17,12 +17,24 @@ class CommitSearch(FacetedSearch):
     }
 
 
-class Repos(DocType):
+class Repos(Document):
     is_public = Boolean()
     created_at = Date()
 
+    class Index:
+        name = 'git'
+
+
+class Commit(Document):
+    files = Keyword()
+    committed_date = Date()
+
+    class Index:
+        name = 'git'
+
 class RepoSearch(FacetedSearch):
     index = 'git'
+    doc_types = [Repos]
     facets = {
       'public': TermsFacet(field='is_public'),
       'created': DateHistogramFacet(field='created_at', interval='month')
@@ -31,6 +43,14 @@ class RepoSearch(FacetedSearch):
     def search(self):
         s = super(RepoSearch, self).search()
         return s.filter('term', commit_repo='repo')
+
+class MetricSearch(FacetedSearch):
+    index = 'git'
+    doc_types = [Commit]
+
+    facets = {
+        'files': TermsFacet(field='files', metric=A('max', field='committed_date')),
+    }
 
 class PRSearch(FacetedSearch):
     index = 'test-prs'
@@ -44,6 +64,15 @@ class PRSearch(FacetedSearch):
             )
         )
     }
+
+def test_facet_with_custom_metric(data_client):
+    ms = MetricSearch()
+    r = ms.execute()
+
+    dates = [f[1] for f in r.facets.files]
+    assert dates == list(sorted(dates, reverse=True))
+    assert dates[0] == 1399038439000
+
 
 def test_nested_facet(pull_request):
     prs = PRSearch()
@@ -76,6 +105,8 @@ def test_boolean_facet(data_client):
 
     assert r.hits.total == 1
     assert [(True, 1, False)] == r.facets.public
+    value, count, selected = r.facets.public[0]
+    assert value is True
 
 
 def test_empty_search_finds_everything(data_client):

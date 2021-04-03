@@ -59,7 +59,7 @@ def test_properties_can_iterate_over_all_the_fields():
     m.field('f3', Nested(test_attr='f3', properties={
             'f4': Text(test_attr='f4')}))
 
-    assert set(('f1', 'f2', 'f3', 'f4')) == set(f.test_attr for f in m.properties._collect_fields())
+    assert {'f1', 'f2', 'f3', 'f4'} == {f.test_attr for f in m.properties._collect_fields()}
 
 def test_mapping_can_collect_all_analyzers_and_normalizers():
     a1 = analysis.analyzer('my_analyzer1',
@@ -172,3 +172,17 @@ def test_resolve_field_can_resolve_multifields():
     m.field('title', 'text', fields={'keyword': Keyword()})
 
     assert isinstance(m.resolve_field('title.keyword'), Keyword)
+
+def test_resolve_nested():
+    m = mapping.Mapping('m')
+    m.field('n1', 'nested', properties={'n2': Nested(properties={'k1': Keyword()})})
+    m.field('k2', 'keyword')
+
+    nested, field = m.resolve_nested('n1.n2.k1')
+    assert nested == ['n1', 'n1.n2']
+    assert isinstance(field, Keyword)
+
+    nested, field = m.resolve_nested('k2')
+    assert nested == []
+    assert isinstance(field, Keyword)
+

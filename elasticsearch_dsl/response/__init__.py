@@ -28,7 +28,7 @@ class Response(AttrDict):
         return len(self.hits)
 
     def __getstate__(self):
-        return (self._d_, self._search, self._doc_class)
+        return self._d_, self._search, self._doc_class
 
     def __setstate__(self, state):
         super(AttrDict, self).__setattr__('_d_', state[0])
@@ -84,3 +84,10 @@ class AggResponse(AttrDict):
         for name in self._meta['aggs']:
             yield self[name]
 
+
+class UpdateByQueryResponse(AttrDict):
+
+    def __init__(self, search, response, doc_class=None):
+        super(AttrDict, self).__setattr__('_search', search)
+        super(AttrDict, self).__setattr__('_doc_class', doc_class)
+        super(UpdateByQueryResponse, self).__init__(response)
